@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2017 VoltDB Inc.
+ * Copyright (C) 2008-2015 VoltDB Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -96,13 +96,14 @@ static StatusListener status_listener;
 
 class VoltCallback : public voltdb::ProcedureCallback {
 public:
-    VoltCallback(int res_id) {
-        m_res_id = res_id;
+    VoltCallback(zend_resource zr) {
+        m_res = zr;
+        m_res_id = zr.handle;
         /*
          * Increment the ref count so that the resource won't be deleted before
          * the callback is called
          */
-        zend_list_addref(m_res_id);
+        zr.gc.refcount++;
     }
 
     /*
@@ -111,7 +112,7 @@ public:
      */
     bool callback(voltdb::InvocationResponse response) throw (voltdb::Exception) {
         int type;
-        voltresponse_res *ptr = (voltresponse_res *)zend_list_find(m_res_id, &type);
+        voltresponse_res *ptr = (voltresponse_res *)m_res.ptr;
 
         if (ptr == NULL || type != le_voltresponse) {
             // TODO: shouldn't happen
@@ -123,15 +124,16 @@ public:
          * Decrement the ref count on the resource so it can be deleted if
          * nobody will access it.
          */
-        zend_list_delete(m_res_id);
+        zend_list_delete(&m_res);
 
         return false;
     }
 private:
     int m_res_id;
+    zend_resource m_res;
 };
 
-static void voltresponse_free(zend_rsrc_list_entry *rsrc TSRMLS_DC)
+static void voltresponse_free(zend_resource *rsrc TSRMLS_DC)
 {
     voltresponse_res *res = (voltresponse_res *)rsrc->ptr;
     assert(res != NULL);
@@ -171,12 +173,12 @@ void voltclient_free(void *obj TSRMLS_CC)
     efree(client_obj);
 }
 
-zend_object_value voltclient_create_handler(zend_class_entry *type TSRMLS_DC)
+zend_object * voltclient_create_handler(zend_class_entry *type TSRMLS_DC)
 {
     zval *tmp;
-    zend_object_value retval;
 
-    voltclient_object *obj = (voltclient_object *)emalloc(sizeof(voltclient_object));
+    voltclient_object *obj = (voltclient_object *)ecalloc(1,
+        sizeof(voltclient_object) + zend_object_properties_size(type));
     memset(obj, 0, sizeof(voltclient_object));
     obj->std.ce = type;
     obj->procedures = std::map<const char *, voltdb::Procedure *>();
@@ -189,12 +191,10 @@ zend_object_value voltclient_create_handler(zend_class_entry *type TSRMLS_DC)
 #else
     object_properties_init(&(obj->std), type);
 #endif
+    
+    obj->std.handlers = &voltclient_object_handlers;
 
-    retval.handle = zend_objects_store_put(obj, NULL,
-                                           voltclient_free, NULL TSRMLS_CC);
-    retval.handlers = &voltclient_object_handlers;
-
-    return retval;
+    return &obj->std;
 }
 
 void create_voltclient_class(int module_number)
@@ -278,10 +278,8 @@ voltdb::Procedure *prepare_to_invoke(INTERNAL_FUNCTION_PARAMETERS, voltclient_ob
 
     if (params != NULL) {
         // Set the parameters, only string params
-        for (zend_hash_internal_pointer_reset_ex(param_hash, &param_ptr);
-             zend_hash_get_current_data_ex(param_hash, (void **)&param, &param_ptr) == SUCCESS;
-             zend_hash_move_forward_ex(param_hash, &param_ptr)) {
-            switch (Z_TYPE_PP(param)) {
+        ZEND_HASH_FOREACH_VAL(param_hash, *param) {
+            switch (Z_TYPE_P(*param)) {
             case IS_NULL:
                 try {
                     proc_params->addString(VOLT_NULL_INDICATOR);
@@ -293,7 +291,7 @@ voltdb::Procedure *prepare_to_invoke(INTERNAL_FUNCTION_PARAMETERS, voltclient_ob
                 break;
             case IS_STRING:
                 try {
-                    proc_params->addString(std::string(Z_STRVAL_PP(param), Z_STRLEN_PP(param)));
+                    proc_params->addString(std::string(Z_STRVAL_P(*param), Z_STRLEN_P(*param)));
                 } catch (voltdb::ParamMismatchException) {
                     zend_throw_exception(zend_exception_get_default(TSRMLS_C), NULL,
                                          errParamMismatchException TSRMLS_CC);
@@ -302,7 +300,8 @@ voltdb::Procedure *prepare_to_invoke(INTERNAL_FUNCTION_PARAMETERS, voltclient_ob
                 break;
             case IS_LONG:
             case IS_DOUBLE:
-            case IS_BOOL:
+            case IS_TRUE:
+            case IS_FALSE:
             case IS_CONSTANT:
                 // Other primitive types will be converted to string
                 /*
@@ -327,7 +326,7 @@ voltdb::Procedure *prepare_to_invoke(INTERNAL_FUNCTION_PARAMETERS, voltclient_ob
                                      errParamMismatchException TSRMLS_CC);
                 return NULL;
             }
-        }
+        } ZEND_HASH_FOREACH_END();
     }
 
     return proc;
@@ -348,7 +347,7 @@ PHP_METHOD(VoltClient, connect)
     long port = 21212;
 
     zval *zobj = getThis();
-    voltclient_object *obj = (voltclient_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    voltclient_object *obj = (voltclient_object *)Z_OBJ_P(zobj TSRMLS_CC);
 
     if (zend_parse_parameters(argc TSRMLS_CC, (char *)"sss|l", &hostname, &len, &username, &len,
                               &password, &len, &port) == FAILURE) {
@@ -377,7 +376,7 @@ PHP_METHOD(VoltClient, connect)
 PHP_METHOD(VoltClient, invoke)
 {
     zval *zobj = getThis();
-    voltclient_object *obj = (voltclient_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    voltclient_object *obj = (voltclient_object *)Z_OBJ_P(zobj TSRMLS_CC);
     voltdb::Procedure *proc = prepare_to_invoke(INTERNAL_FUNCTION_PARAM_PASSTHRU, obj);
     if (proc == NULL) {
         RETURN_NULL();
@@ -413,7 +412,7 @@ PHP_METHOD(VoltClient, invoke)
 PHP_METHOD(VoltClient, invokeAsync)
 {
     zval *zobj = getThis();
-    voltclient_object *obj = (voltclient_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    voltclient_object *obj = (voltclient_object *)Z_OBJ_P(zobj TSRMLS_CC);
     voltdb::Procedure *proc = prepare_to_invoke(INTERNAL_FUNCTION_PARAM_PASSTHRU, obj);
     if (proc == NULL) {
         RETURN_NULL();
@@ -421,8 +420,8 @@ PHP_METHOD(VoltClient, invokeAsync)
 
     // Set up the response resource and the callback
     voltresponse_res *response = (voltresponse_res *)emalloc(sizeof(voltresponse_res));
-    int res_id = ZEND_REGISTER_RESOURCE(return_value, response, le_voltresponse);
-    boost::shared_ptr<VoltCallback> callback(new VoltCallback(res_id));
+    zend_resource *res = zend_register_resource(response, le_voltresponse);
+    boost::shared_ptr<VoltCallback> callback(new VoltCallback(*res));
 
     // Invoke the procedure
     try {
@@ -451,8 +450,7 @@ PHP_METHOD(VoltClient, getResponse)
         RETURN_NULL();
     }
 
-    ZEND_FETCH_RESOURCE(response, voltresponse_res *, &zresponse, -1,
-                        (char *)VOLT_RESPONSE_RES_NAME, le_voltresponse);
+    response = (voltresponse_res *)zend_fetch_resource(Z_RES_P(zresponse), (char *)VOLT_RESPONSE_RES_NAME, le_voltresponse);
     if (response != NULL && response->resp != NULL) {
         // Instantiate a PHP response object
         struct voltresponse_object *ro = instantiate_voltresponse(return_value, *response->resp);
@@ -469,7 +467,7 @@ PHP_METHOD(VoltClient, getResponse)
 PHP_METHOD(VoltClient, drain)
 {
     zval *zobj = getThis();
-    voltclient_object *obj = (voltclient_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    voltclient_object *obj = (voltclient_object *)Z_OBJ_P(zobj TSRMLS_CC);
 
     bool retval;
     try {
@@ -495,7 +493,7 @@ PHP_METHOD(VoltClient, drain)
 PHP_METHOD(VoltClient, close)
 {
     zval *zobj = getThis();
-    voltclient_object *obj = (voltclient_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    voltclient_object *obj = (voltclient_object *)Z_OBJ_P(zobj TSRMLS_CC);
 
     try {
         if (obj->client != NULL) {

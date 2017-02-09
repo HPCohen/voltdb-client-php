@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2017 VoltDB Inc.
+ * Copyright (C) 2008-2015 VoltDB Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -60,13 +60,13 @@ void volttable_free(void *obj TSRMLS_CC)
     efree(table_obj);
 }
 
-zend_object_value volttable_create_handler(zend_class_entry *type TSRMLS_DC)
+zend_object * volttable_create_handler(zend_class_entry *type TSRMLS_DC)
 {
     zval *tmp;
-    zend_object_value retval;
 
-    volttable_object *obj = (volttable_object *)emalloc(sizeof(volttable_object));
-    memset(obj, 0, sizeof(volttable_object));
+    volttable_object *obj = (volttable_object *)ecalloc(1,
+    sizeof(volttable_object) + zend_object_properties_size(type));
+    memset((void *)obj, 0, sizeof(volttable_object));
     obj->std.ce = type;
 
     ALLOC_HASHTABLE(obj->std.properties);
@@ -78,11 +78,9 @@ zend_object_value volttable_create_handler(zend_class_entry *type TSRMLS_DC)
     object_properties_init(&(obj->std), type);
 #endif
 
-    retval.handle = zend_objects_store_put(obj, NULL,
-                                           volttable_free, NULL TSRMLS_CC);
-    retval.handlers = &volttable_object_handlers;
+    obj->std.handlers = &volttable_object_handlers;
 
-    return retval;
+    return &obj->std;
 }
 
 void create_volttable_class(void)
@@ -105,7 +103,7 @@ struct volttable_object *instantiate_volttable(zval *return_val, voltdb::Table &
         return NULL;
     }
 
-    to = (struct volttable_object *)zend_object_store_get_object(return_val TSRMLS_CC);
+    to = (struct volttable_object *)Z_OBJ_P(return_val);
     assert(to != NULL);
     to->table = new voltdb::Table(table);
     to->it = to->table->iterator();
@@ -202,7 +200,7 @@ int row_to_array(zval *return_value, voltdb::Row row)
                  * the refcount is decremented.
                  */
                 char *dup_val = estrdup(value.c_str());
-                add_assoc_string_ex(return_value, name.c_str(), name_len, dup_val, 0);
+                add_assoc_string_ex(return_value, name.c_str(), name_len, dup_val);
                 break;
             }
             case voltdb::WIRE_TYPE_TIMESTAMP:
@@ -229,7 +227,7 @@ int row_to_array(zval *return_value, voltdb::Row row)
                  * precision to hold a SQL decimal
                  */
                 char *dup_val = estrdup(value.toString().c_str());
-                add_assoc_string_ex(return_value, name.c_str(), name_len, dup_val, 0);
+                add_assoc_string_ex(return_value, name.c_str(), name_len, dup_val);
                 break;
             }
             case voltdb::WIRE_TYPE_VARBINARY:
@@ -249,28 +247,28 @@ int row_to_array(zval *return_value, voltdb::Row row)
 PHP_METHOD(VoltTable, statusCode)
 {
     zval *zobj = getThis();
-    volttable_object *obj = (volttable_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    volttable_object *obj = (volttable_object *)Z_OBJ_P(zobj);
     RETURN_LONG(obj->table->getStatusCode());
 }
 
 PHP_METHOD(VoltTable, rowCount)
 {
     zval *zobj = getThis();
-    volttable_object *obj = (volttable_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    volttable_object *obj = (volttable_object *)Z_OBJ_P(zobj);
     RETURN_LONG(obj->table->rowCount());
 }
 
 PHP_METHOD(VoltTable, columnCount)
 {
     zval *zobj = getThis();
-    volttable_object *obj = (volttable_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    volttable_object *obj = (volttable_object *)Z_OBJ_P(zobj);
     RETURN_LONG(obj->table->columnCount());
 }
 
 PHP_METHOD(VoltTable, hasMoreRows)
 {
     zval *zobj = getThis();
-    volttable_object *obj = (volttable_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    volttable_object *obj = (volttable_object *)Z_OBJ_P(zobj);
     if (!obj->it.hasNext()) {
         RETURN_FALSE;
     } else {
@@ -281,7 +279,7 @@ PHP_METHOD(VoltTable, hasMoreRows)
 PHP_METHOD(VoltTable, nextRow)
 {
     zval *zobj = getThis();
-    volttable_object *obj = (volttable_object *)zend_object_store_get_object(zobj TSRMLS_CC);
+    volttable_object *obj = (volttable_object *)Z_OBJ_P(zobj);
 
     if (!obj->it.hasNext()) {
         RETURN_NULL();
